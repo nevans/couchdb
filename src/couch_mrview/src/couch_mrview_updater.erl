@@ -171,8 +171,7 @@ write_results(Parent, State) ->
         closed ->
             Parent ! {new_state, State};
         {ok, Info} ->
-            EmptyKVs = [{V#mrview.id_num, []} || V <- State#mrst.views],
-            {Seq, ViewKVs, DocIdKeys} = merge_results(Info, 0, EmptyKVs, []),
+            {Seq, ViewKVs, DocIdKeys} = merge_results(Info, State#mrst.views),
             NewState = write_kvs(State, Seq, ViewKVs, DocIdKeys),
             send_partial(NewState#mrst.partial_resp_pid, NewState),
             write_results(Parent, NewState)
@@ -189,39 +188,37 @@ start_query_server(State) ->
     {ok, QServer} = couch_query_servers:start_doc_map(Language, Defs, Lib),
     State#mrst{qserver=QServer}.
 
+merge_results(Info, Views) ->
+    EmptyKVs = [{V#mrview.id_num, []} || V <- Views],
+    lists:foldl(fun merge_seq_results/2, {0, EmptyKVs, []}, Info).
 
-merge_results([], SeqAcc, ViewKVs, DocIdKeys) ->
-    {SeqAcc, ViewKVs, DocIdKeys};
-merge_results([{Seq, Results} | Rest], SeqAcc, ViewKVs, DocIdKeys) ->
-    Fun = fun(RawResults, {VKV, DIK}) ->
-        merge_results(RawResults, VKV, DIK)
-    end,
-    {ViewKVs1, DocIdKeys1} = lists:foldl(Fun, {ViewKVs, DocIdKeys}, Results),
-    merge_results(Rest, erlang:max(Seq, SeqAcc), ViewKVs1, DocIdKeys1).
+merge_seq_results({Seq, SeqResults}, {SeqAcc, ViewKVs, DocIdKeys}) ->
+    {NewViewKVs, NewDocIdKeys} = lists:foldl(
+        fun merge_doc_results/2, {ViewKVs, DocIdKeys}, SeqResults
+    ),
+    {erlang:max(Seq, SeqAcc), NewViewKVs, NewDocIdKeys}.
 
-
-merge_results({DocId, []}, ViewKVs, DocIdKeys) ->
+merge_doc_results({DocId, []}, {ViewKVs, DocIdKeys}) ->
     {ViewKVs, [{DocId, []} | DocIdKeys]};
-merge_results({DocId, RawResults}, ViewKVs, DocIdKeys) ->
+merge_doc_results({DocId, RawResults}, {ViewKVs, DocIdKeys}) ->
     JsonResults = couch_query_servers:raw_to_ejson(RawResults),
     Results = [[list_to_tuple(Res) || Res <- FunRs] || FunRs <- JsonResults],
     {ViewKVs1, ViewIdKeys} = insert_results(DocId, Results, ViewKVs, [], []),
     {ViewKVs1, [ViewIdKeys | DocIdKeys]}.
 
-
 insert_results(DocId, [], [], ViewKVs, ViewIdKeys) ->
     {lists:reverse(ViewKVs), {DocId, ViewIdKeys}};
 insert_results(DocId, [KVs | RKVs], [{Id, VKVs} | RVKVs], VKVAcc, VIdKeys) ->
-    CombineDupesFun = fun
-        ({Key, Val}, {[{Key, {dups, Vals}} | Rest], IdKeys}) ->
-            {[{Key, {dups, [Val | Vals]}} | Rest], IdKeys};
-        ({Key, Val1}, {[{Key, Val2} | Rest], IdKeys}) ->
-            {[{Key, {dups, [Val1, Val2]}} | Rest], IdKeys};
-        ({Key, _}=KV, {Rest, IdKeys}) ->
-            {[KV | Rest], [{Id, Key} | IdKeys]}
-    end,
-    InitAcc = {[], VIdKeys},
-    {Duped, VIdKeys0} = lists:foldl(CombineDupesFun, InitAcc, lists:sort(KVs)),
+    {Duped, VIdKeys0} = lists:foldl(
+      fun
+          ({Key, Val}, {[{Key, {dups, Vals}} | Rest], IdKeys}) ->
+              {[{Key, {dups, [Val | Vals]}} | Rest], IdKeys};
+          ({Key, Val1}, {[{Key, Val2} | Rest], IdKeys}) ->
+              {[{Key, {dups, [Val1, Val2]}} | Rest], IdKeys};
+          ({Key, _}=KV, {Rest, IdKeys}) ->
+              {[KV | Rest], [{Id, Key} | IdKeys]}
+      end,
+      {[], VIdKeys}, lists:sort(KVs)),
     FinalKVs = [{{Key, DocId}, Val} || {Key, Val} <- Duped] ++ VKVs,
     insert_results(DocId, RKVs, RVKVs, [{Id, FinalKVs} | VKVAcc], VIdKeys0).
 
@@ -250,7 +247,6 @@ write_kvs(State, UpdateSeq, ViewKVs, DocIdKeys) ->
         update_seq=UpdateSeq,
         id_btree=IdBtree2
     }.
-
 
 update_id_btree(Btree, DocIdKeys, true) ->
     ToAdd = [{Id, DIKeys} || {Id, DIKeys} <- DocIdKeys, DIKeys /= []],
