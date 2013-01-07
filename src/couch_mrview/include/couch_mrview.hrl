@@ -29,6 +29,8 @@
     doc_acc,
     doc_queue,
     write_queue,
+    nested_map_queue,
+    nested_write_queue,
     qserver=nil
 }).
 
@@ -41,6 +43,7 @@
     reduce_funs=[],
     def,
     btree=nil,
+    nested_views=[],
     options=[]
 }).
 

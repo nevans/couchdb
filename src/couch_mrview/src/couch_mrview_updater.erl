@@ -20,15 +20,19 @@
 
 start_update(Partial, State, NumChanges) ->
     QueueOpts = [{max_size, 100000}, {max_items, 500}],
-    {ok, DocQueue} = couch_work_queue:new(QueueOpts),
-    {ok, WriteQueue} = couch_work_queue:new(QueueOpts),
+    {ok, DocQueue}     = couch_work_queue:new(QueueOpts),
+    {ok, WriteQueue}   = couch_work_queue:new(QueueOpts),
+    {ok, NestedMapQ}   = couch_work_queue:new(QueueOpts),
+    {ok, NestedWriteQ} = couch_work_queue:new(QueueOpts),
 
     InitState = State#mrst{
         first_build=State#mrst.update_seq==0,
         partial_resp_pid=Partial,
         doc_acc=[],
         doc_queue=DocQueue,
-        write_queue=WriteQueue
+        write_queue=WriteQueue,
+        nested_map_queue=NestedMapQ,
+        nested_write_queue=NestedWriteQ
     },
 
     Self = self(),
@@ -45,9 +49,11 @@ start_update(Partial, State, NumChanges) ->
         map_docs(Self, InitState)
     end,
     WriteFun = fun() -> write_results(Self, InitState) end,
+    NestedViewFun = fun() -> nested_view_map(Self, InitState) end,
 
     spawn_link(MapFun),
     spawn_link(WriteFun),
+    spawn_link(NestedViewFun),
 
     {ok, InitState}.
 
@@ -130,15 +136,11 @@ map_docs(Parent, State0) ->
             couch_query_servers:stop_doc_map(State0#mrst.qserver),
             couch_work_queue:close(State0#mrst.write_queue);
         {ok, Dequeued} ->
-            State1 = case State0#mrst.qserver of
-                nil -> start_query_server(State0);
-                _ -> State0
-            end,
+            State1 = with_query_server(State0, State0#mrst.views),
             {ok, MapResults} = compute_map_results(State1, Dequeued),
             couch_work_queue:queue(State1#mrst.write_queue, MapResults),
             map_docs(Parent, State1)
     end.
-
 
 compute_map_results(#mrst{qserver = Qs}, Dequeued) ->
     % Run all the non deleted docs through the view engine and
@@ -165,28 +167,93 @@ compute_map_results(#mrst{qserver = Qs}, Dequeued) ->
     update_task(length(AllMapResults)),
     {ok, {MaxSeq, AllMapResults}}.
 
-
-write_results(Parent, State) ->
-    case couch_work_queue:dequeue(State#mrst.write_queue) of
-        closed ->
-            Parent ! {new_state, State};
-        {ok, Info} ->
-            {Seq, ViewKVs, DocIdKeys} = merge_results(Info, State#mrst.views),
-            NewState = write_kvs(State, Seq, ViewKVs, DocIdKeys),
-            send_partial(NewState#mrst.partial_resp_pid, NewState),
-            write_results(Parent, NewState)
+with_query_server(State, Views) ->
+    case State#mrst.qserver of
+        nil -> start_query_server(State, Views);
+        _ -> State
     end.
 
-
-start_query_server(State) ->
+start_query_server(State, Views) ->
     #mrst{
         language=Language,
-        lib=Lib,
-        views=Views
+        lib=Lib
     } = State,
     Defs = [View#mrview.def || View <- Views],
     {ok, QServer} = couch_query_servers:start_doc_map(Language, Defs, Lib),
     State#mrst{qserver=QServer}.
+
+
+nested_view_map(Parent, State) ->
+    case couch_work_queue:dequeue(State#mrst.nested_map_queue) of
+        closed -> ok;
+        {ok, {Ref, Views, Dequeued}} ->
+            NewState = with_query_server(State, Views),
+            {ok, MapResults} = compute_map_results(NewState, Dequeued),
+            couch_work_queue:queue(NewState#mrst.nested_write_queue,
+                                   {Ref, MapResults}),
+            couch_query_servers:stop_doc_map(NewState#mrst.qserver),
+            nested_view_map(Parent, State)
+    end.
+
+
+write_results(Parent, State) ->
+    case couch_work_queue:dequeue(State#mrst.write_queue) of
+        closed ->
+            couch_work_queue:close(State#mrst.nested_map_queue),
+            couch_work_queue:close(State#mrst.nested_write_queue),
+            Parent ! {new_state, State};
+        {ok, Info} ->
+            {Seq, ViewKVs, DocIdKeys} = merge_results(Info, State#mrst.views),
+            {NewState, ToRemByView} = write_kvs(State, Seq, ViewKVs, DocIdKeys),
+            handle_nested_views(NewState, NewState#mrst.views,
+                                ViewKVs, ToRemByView),
+            send_partial(NewState#mrst.partial_resp_pid, NewState),
+            write_results(Parent, NewState)
+    end.
+
+% Depth first recursive traversal
+handle_nested_views(_State, [], [], []) -> ok;
+handle_nested_views(State, Views, ViewKVs, ToRemByView) ->
+    [#mrview{id_num=ViewId}=View | RestViews]   = Views,
+    [{ViewId, KVs}               | RestViewKVs] = ViewKVs,
+    RemovedKeys = couch_util:dict_find(ViewId, ToRemByView, []),
+    NewState = case View#mrview.nested_views of
+        [] -> State;
+        _  -> update_nested_view(State, View, KVs, RemovedKeys)
+    end,
+    handle_nested_views(NewState, RestViews, RestViewKVs, ToRemByView).
+
+update_nested_view(State, View, KVs, RemovedKeys) ->
+    ChangedViewKeys = unique_view_keys(KVs, RemovedKeys),
+    case view_reduced_results(View, ChangedViewKeys) of
+        [] -> ok;
+        ReducedResults ->
+            Ref           = make_ref(),
+            NestedViews   = View#mrview.nested_views,
+            NestedMapWork = {Ref, NestedViews, ReducedResults},
+            couch_work_queue:queue(State#mrst.nested_map_queue, NestedMapWork),
+            write_nested_results(State, NestedViews, Ref)
+    end.
+
+write_nested_results(State, NestedViews, Ref) ->
+    case couch_work_queue:dequeue(State#mrst.nested_write_queue) of
+        closed -> error(nested_write_queue_closed_prematurely);
+        {ok, {Ref, Results}} ->
+            {Seq, ViewKVs, DocIdKeys} = merge_results(Results, NestedViews),
+            {NewState, ToRemByView}   = write_kvs(State, Seq, ViewKVs, DocIdKeys),
+            handle_nested_views(NewState, NestedViews, ViewKVs, ToRemByView)
+    end.
+
+unique_view_keys(KVs, RemovedKeys) ->
+    Set0 = sets:from_list(RemovedKeys),
+    Set1 = sets:from_list([Key || {{Key, _DocId}, _Value} <- KVs]),
+    Set2 = sets:union([Set0, Set1]),
+    sets:to_list(Set2).
+
+view_reduced_results(_View, []) -> [];
+view_reduced_results(_View, _Keys) ->
+    % TODO: figure out how to load the reduced rows group_level=exact
+    [].
 
 % Info        = [{Seq, SeqResults}   | _Rest]
 % SeqResults  = [{DocId, RawResults} | _Rest]
@@ -255,11 +322,12 @@ write_kvs(State, UpdateSeq, ViewKVs, DocIdKeys) ->
     {ok, ToRemove, IdBtree2} = update_id_btree(IdBtree, DocIdKeys, FirstBuild),
     ToRemByView = collapse_rem_keys(ToRemove),
     UpdateViews = update_view_zipper(UpdateSeq, ToRemByView),
-    State#mrst{
+    NewState = State#mrst{
         views=lists:zipwith(UpdateViews, State#mrst.views, ViewKVs),
         update_seq=UpdateSeq,
         id_btree=IdBtree2
-    }.
+    },
+    {NewState, ToRemByView}.
 
 update_id_btree(Btree, DocIdKeys, true) ->
     ToAdd = [{Id, DIKeys} || {Id, DIKeys} <- DocIdKeys, DIKeys /= []],
