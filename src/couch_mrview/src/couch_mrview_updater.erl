@@ -188,9 +188,28 @@ start_query_server(State) ->
     {ok, QServer} = couch_query_servers:start_doc_map(Language, Defs, Lib),
     State#mrst{qserver=QServer}.
 
+% Info        = [{Seq, SeqResults}   | _Rest]
+% SeqResults  = [{DocId, RawResults} | _Rest]
+% RawResults  = string output from view server map_doc
+% DocResults  = [FunResults          | _Rest]
+% FunResults  = [Emit                | _Rest]
+% Emit        = {Key, Value}
+%
+% returns: {Seq, ViewKVs, DocIdKeys}
+% Seq         = highest Seq
+% ViewKVs     = [{ViewId, ViewEntries} | _Rest]
+% DocIdKeys   = [{DocId,  ViewIdKeys}  | _Rest]
+%
+% ViewEntries = [{{Key, DocID}, Value} | _Rest]
+% ViewIdKeys  = {ViewId, ViewKey}      | _Rest]
+% Value       = JsonObject or {dups, [JsonObject | _Rest]}
+%
+% So:
+% Info        = [{Seq, [{DocId, [[ {K,V} ]]}]}]
+% Return      = {Seq, [{ViewId, [ {{K,ID},V} ]}], [{DocId, [{ViewID,K}]}]}
 merge_results(Info, Views) ->
-    EmptyKVs = [{V#mrview.id_num, []} || V <- Views],
-    lists:foldl(fun merge_seq_results/2, {0, EmptyKVs, []}, Info).
+    ViewKVs = [{V#mrview.id_num, []} || V <- Views],
+    lists:foldl(fun merge_seq_results/2, {0, ViewKVs, []}, Info).
 
 merge_seq_results({Seq, SeqResults}, {SeqAcc, ViewKVs, DocIdKeys}) ->
     {NewViewKVs, NewDocIdKeys} = lists:foldl(
@@ -201,27 +220,34 @@ merge_seq_results({Seq, SeqResults}, {SeqAcc, ViewKVs, DocIdKeys}) ->
 merge_doc_results({DocId, []}, {ViewKVs, DocIdKeys}) ->
     {ViewKVs, [{DocId, []} | DocIdKeys]};
 merge_doc_results({DocId, RawResults}, {ViewKVs, DocIdKeys}) ->
-    JsonResults = couch_query_servers:raw_to_ejson(RawResults),
-    Results = [[list_to_tuple(Res) || Res <- FunRs] || FunRs <- JsonResults],
-    {ViewKVs1, ViewIdKeys} = insert_results(DocId, Results, ViewKVs, [], []),
-    {ViewKVs1, [ViewIdKeys | DocIdKeys]}.
+    DocResults = parse_results(RawResults),
+    {NewViewKVs, ViewIDKeys} = lists:foldl(
+        merge_view_results(DocId), {[], []}, lists:zip(DocResults, ViewKVs)
+    ),
+    {lists:reverse(NewViewKVs), [{DocId, ViewIDKeys} | DocIdKeys]}.
 
-insert_results(DocId, [], [], ViewKVs, ViewIdKeys) ->
-    {lists:reverse(ViewKVs), {DocId, ViewIdKeys}};
-insert_results(DocId, [KVs | RKVs], [{Id, VKVs} | RVKVs], VKVAcc, VIdKeys) ->
-    {Duped, VIdKeys0} = lists:foldl(
-      fun
-          ({Key, Val}, {[{Key, {dups, Vals}} | Rest], IdKeys}) ->
-              {[{Key, {dups, [Val | Vals]}} | Rest], IdKeys};
-          ({Key, Val1}, {[{Key, Val2} | Rest], IdKeys}) ->
-              {[{Key, {dups, [Val1, Val2]}} | Rest], IdKeys};
-          ({Key, _}=KV, {Rest, IdKeys}) ->
-              {[KV | Rest], [{Id, Key} | IdKeys]}
-      end,
-      {[], VIdKeys}, lists:sort(KVs)),
-    FinalKVs = [{{Key, DocId}, Val} || {Key, Val} <- Duped] ++ VKVs,
-    insert_results(DocId, RKVs, RVKVs, [{Id, FinalKVs} | VKVAcc], VIdKeys0).
+parse_results(RawResults) ->
+    DocResults = couch_query_servers:raw_to_ejson(RawResults),
+    [[list_to_tuple(Emit) || Emit <- FunResults] || FunResults <- DocResults].
 
+merge_view_results(DocId) ->
+    fun ({DocViewResults, {ViewId, ThisViewKVs}}, {ViewKVs, ViewIdKeys}) ->
+        {Duped, UniqueViewIdKeys} = lists:foldl(
+            view_dup_reduction(ViewId),
+            {[], ViewIdKeys}, lists:sort(DocViewResults)
+        ),
+        FinalKVs = [{{Key, DocId}, Val} || {Key, Val} <- Duped] ++ ThisViewKVs,
+        {[{ViewId, FinalKVs} | ViewKVs], UniqueViewIdKeys}
+    end.
+
+view_dup_reduction(ViewId) ->
+    fun ({Key, Val1}, {[{Key, Val2}         | Rest], IdKeys}) ->
+            {[{Key, {dups, [Val1, Val2]}} | Rest], IdKeys};
+        ({Key, Val},  {[{Key, {dups, Vals}} | Rest], IdKeys}) ->
+            {[{Key, {dups, [Val | Vals]}} | Rest], IdKeys};
+        ({Key, _}=KV, {                        Rest, IdKeys}) ->
+            {[KV | Rest], [{ViewId, Key} | IdKeys]}
+    end.
 
 write_kvs(State, UpdateSeq, ViewKVs, DocIdKeys) ->
     #mrst{
