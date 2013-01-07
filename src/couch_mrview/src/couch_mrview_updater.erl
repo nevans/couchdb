@@ -212,7 +212,7 @@ write_results(Parent, State) ->
     end.
 
 % Depth first recursive traversal
-handle_nested_views(_State, [], [], []) -> ok;
+handle_nested_views(_State, [], [], _ToRemByView) -> ok;
 handle_nested_views(State, Views, ViewKVs, ToRemByView) ->
     [#mrview{id_num=ViewId}=View | RestViews]   = Views,
     [{ViewId, KVs}               | RestViewKVs] = ViewKVs,
