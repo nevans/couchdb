@@ -249,27 +249,14 @@ view_dup_reduction(ViewId) ->
             {[KV | Rest], [{ViewId, Key} | IdKeys]}
     end.
 
+
 write_kvs(State, UpdateSeq, ViewKVs, DocIdKeys) ->
-    #mrst{
-        id_btree=IdBtree,
-        first_build=FirstBuild
-    } = State,
-
+    #mrst{id_btree=IdBtree, first_build=FirstBuild} = State,
     {ok, ToRemove, IdBtree2} = update_id_btree(IdBtree, DocIdKeys, FirstBuild),
-    ToRemByView = collapse_rem_keys(ToRemove, dict:new()),
-
-    UpdateView = fun(#mrview{id_num=ViewId}=View, {ViewId, KVs}) ->
-        ToRem = couch_util:dict_find(ViewId, ToRemByView, []),
-        {ok, VBtree2} = couch_btree:add_remove(View#mrview.btree, KVs, ToRem),
-        NewUpdateSeq = case VBtree2 =/= View#mrview.btree of
-            true -> UpdateSeq;
-            _ -> View#mrview.update_seq
-        end,
-        View#mrview{btree=VBtree2, update_seq=NewUpdateSeq}
-    end,
-
+    ToRemByView = collapse_rem_keys(ToRemove),
+    UpdateViews = update_view_zipper(UpdateSeq, ToRemByView),
     State#mrst{
-        views=lists:zipwith(UpdateView, State#mrst.views, ViewKVs),
+        views=lists:zipwith(UpdateViews, State#mrst.views, ViewKVs),
         update_seq=UpdateSeq,
         id_btree=IdBtree2
     }.
@@ -283,9 +270,8 @@ update_id_btree(Btree, DocIdKeys, _) ->
     ToRem = [Id || {Id, DIKeys} <- DocIdKeys, DIKeys == []],
     couch_btree:query_modify(Btree, ToFind, ToAdd, ToRem).
 
-
-collapse_rem_keys([], Acc) ->
-    Acc;
+collapse_rem_keys(ToRemove) -> collapse_rem_keys(ToRemove, dict:new()).
+collapse_rem_keys([], Acc) -> Acc;
 collapse_rem_keys([{ok, {DocId, ViewIdKeys}} | Rest], Acc) ->
     NewAcc = lists:foldl(fun({ViewId, Key}, Acc2) ->
         dict:append(ViewId, {Key, DocId}, Acc2)
@@ -293,6 +279,17 @@ collapse_rem_keys([{ok, {DocId, ViewIdKeys}} | Rest], Acc) ->
     collapse_rem_keys(Rest, NewAcc);
 collapse_rem_keys([{not_found, _} | Rest], Acc) ->
     collapse_rem_keys(Rest, Acc).
+
+update_view_zipper(UpdateSeq, ToRemByView) ->
+    fun(#mrview{id_num=ViewId}=View, {ViewId, KVs}) ->
+        ToRem = couch_util:dict_find(ViewId, ToRemByView, []),
+        {ok, VBtree2} = couch_btree:add_remove(View#mrview.btree, KVs, ToRem),
+        NewUpdateSeq = case VBtree2 =/= View#mrview.btree of
+            true -> UpdateSeq;
+            _ -> View#mrview.update_seq
+        end,
+        View#mrview{btree=VBtree2, update_seq=NewUpdateSeq}
+    end.
 
 
 send_partial(Pid, State) when is_pid(Pid) ->
