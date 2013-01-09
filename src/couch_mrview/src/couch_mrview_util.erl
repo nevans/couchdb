@@ -91,7 +91,6 @@ ddoc_to_mrst(DbName, #doc{id=Id, body={Fields}}) ->
 
     Language = couch_util:get_value(<<"language">>, Fields, <<"javascript">>),
     {DesignOpts} = couch_util:get_value(<<"options">>, Fields, {[]}),
-    {RawViews} = couch_util:get_value(<<"views">>, Fields, {[]}),
     Lib = couch_util:get_value(<<"lib">>, RawViews, {[]}),
 
     IdxState = #mrst{
