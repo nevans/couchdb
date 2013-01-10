@@ -112,30 +112,20 @@ convert_fun_arity(Fun) when is_function(Fun, 3) ->
 convert_fun_arity(Fun) when is_function(Fun, 4) ->
     Fun.    % Already arity 4
 
-make_key_in_end_range_function(#btree{less=Less}, fwd, Options) ->
+make_key_in_end_range_function(#btree{less=Less}, Dir, Options) ->
     case couch_util:get_value(end_key_gt, Options) of
     undefined ->
         case couch_util:get_value(end_key, Options) of
         undefined ->
             fun(_Key) -> true end;
         LastKey ->
-            fun(Key) -> not Less(LastKey, Key) end
+            fun(Key) -> not less_by_direction(Dir, Less, Key, LastKey) end
         end;
     EndKey ->
-        fun(Key) -> Less(Key, EndKey) end
-    end;
-make_key_in_end_range_function(#btree{less=Less}, rev, Options) ->
-    case couch_util:get_value(end_key_gt, Options) of
-    undefined ->
-        case couch_util:get_value(end_key, Options) of
-        undefined ->
-            fun(_Key) -> true end;
-        LastKey ->
-            fun(Key) -> not Less(Key, LastKey) end
-        end;
-    EndKey ->
-        fun(Key) -> Less(EndKey, Key) end
+        fun(Key) -> less_by_direction(Dir, Less, EndKey, Key) end
     end.
+less_by_direction(fwd, Less, Key0, Key1) -> Less(Key1, Key0);
+less_by_direction(rev, Less, Key0, Key1) -> Less(Key0, Key1).
 
 
 foldl(Bt, Fun, Acc) ->
@@ -151,14 +141,14 @@ fold(#btree{root=Root}=Bt, Fun, Acc, Options) ->
     Dir = couch_util:get_value(dir, Options, fwd),
     InRange = make_key_in_end_range_function(Bt, Dir, Options),
     Result =
-    case couch_util:get_value(start_key, Options) of
-    undefined ->
-        stream_node(Bt, [], Bt#btree.root, InRange, Dir,
-                convert_fun_arity(Fun), Acc);
-    StartKey ->
-        stream_node(Bt, [], Bt#btree.root, StartKey, InRange, Dir,
-                convert_fun_arity(Fun), Acc)
-    end,
+        case couch_util:get_value(start_key, Options) of
+        undefined ->
+            stream_node(Bt, [], Bt#btree.root, InRange, Dir,
+                    convert_fun_arity(Fun), Acc);
+        StartKey ->
+            stream_node(Bt, [], Bt#btree.root, StartKey, InRange, Dir,
+                    convert_fun_arity(Fun), Acc)
+        end,
     case Result of
     {ok, Acc2}->
         FullReduction = element(2, Root),
@@ -300,13 +290,9 @@ chunkify([InElement | RestInList], ChunkThreshold, OutList, OutListSize, OutputC
     end.
 
 modify_node(Bt, RootPointerInfo, Actions, QueryOutput) ->
-    case RootPointerInfo of
-    nil ->
-        NodeType = kv_node,
-        NodeList = [];
-    _Tuple ->
-        Pointer = element(1, RootPointerInfo),
-        {NodeType, NodeList} = get_node(Bt, Pointer)
+    {NodeType, NodeList} = case RootPointerInfo of
+        nil    -> {kv_node, []};
+        _Tuple -> get_node(Bt, element(1, RootPointerInfo))
     end,
     NodeTuple = list_to_tuple(NodeList),
 

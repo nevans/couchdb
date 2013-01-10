@@ -206,7 +206,7 @@ open_view(Db, Fd, Lang, {BTState, USeq, PSeq}, View) ->
     FunSrcs = [FunSrc || {_Name, FunSrc} <- View#mrview.reduce_funs],
     ReduceFun =
         fun(reduce, KVs) ->
-            KVs2 = detuple_kvs(expand_dups(KVs, []), []),
+            KVs2 = expand_and_detuple_kvs(KVs),
             {ok, Result} = couch_query_servers:reduce(Lang, FunSrcs, KVs2),
             {length(KVs2), Result};
         (rereduce, Reds) ->
@@ -278,7 +278,7 @@ reduce_to_count(Reductions) ->
 
 fold(#mrview{btree=Bt}, Fun, Acc, Opts) ->
     WrapperFun = fun(KV, Reds, Acc2) ->
-        fold_fun(Fun, expand_dups([KV], []), Reds, Acc2)
+        fold_fun(Fun, expand_dups([KV]), Reds, Acc2)
     end,
     {ok, _LastRed, _Acc} = couch_btree:fold(Bt, WrapperFun, Acc, Opts).
 
@@ -305,7 +305,7 @@ fold_reduce({NthRed, Lang, View}, Fun,  Acc, Options) ->
 
     ReduceFun = fun
         (reduce, KVs0) ->
-            KVs1 = detuple_kvs(expand_dups(KVs0, []), []),
+            KVs1 = expand_and_detuple_kvs(KVs0),
             {ok, Red} = couch_query_servers:reduce(Lang, [FunSrc], KVs1),
             {0, LPad ++ Red ++ RPad};
         (rereduce, Reds) ->
@@ -638,23 +638,14 @@ sum_btree_sizes(_, nil) ->
 sum_btree_sizes(Size1, Size2) ->
     Size1 + Size2.
 
+expand_and_detuple_kvs(KVList) ->
+    [[[Key, Id], Value] || {{Key, Id}, Value} <- expand_dups(KVList)].
 
-detuple_kvs([], Acc) ->
-    lists:reverse(Acc);
-detuple_kvs([KV | Rest], Acc) ->
-    {{Key,Id},Value} = KV,
-    NKV = [[Key, Id], Value],
-    detuple_kvs(Rest, [NKV | Acc]).
-
-
-expand_dups([], Acc) ->
-    lists:reverse(Acc);
-expand_dups([{Key, {dups, Vals}} | Rest], Acc) ->
-    Expanded = [{Key, Val} || Val <- Vals],
-    expand_dups(Rest, Expanded ++ Acc);
-expand_dups([KV | Rest], Acc) ->
-    expand_dups(Rest, [KV | Acc]).
-
+expand_dups(KVList) ->
+    lists:flatmap(fun
+        ({Key, {dups, Vals}}) -> [{Key, Val} || Val <- Vals];
+        (KV) -> [KV]
+    end, KVList).
 
 maybe_load_doc(_Db, _DI, #mrargs{include_docs=false}) ->
     [];
