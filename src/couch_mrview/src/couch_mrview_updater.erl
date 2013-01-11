@@ -229,6 +229,9 @@ write_results(Parent, State0) ->
 %            traverse_nested_views(State1, NestedViews, ViewKVs, ToRemByView)
 %    end.
 
+% TODO: make ViewKVs a dict, Key=ViewID; Value=ViewEntries.
+% it's currently being accessed via lists:keyfind
+%
 % Info        = [{Seq, SeqResults}   | _Rest]
 % SeqResults  = [{DocId, RawResults} | _Rest]
 % RawResults  = string output from view server map_doc
@@ -343,17 +346,31 @@ update_view(#mrview{id_num=ViewID}=View, UpdateSeq, ViewKVs, ToRemByView) ->
 
 
 % Depth first recursive traversal
-traverse_nested_views(State, _,_,_) -> State.
-%traverse_nested_views(State, [], [], _ToRemByView) -> State;
-%traverse_nested_views(State, Views, ViewKVs, ToRemByView) ->
-%    [#mrview{id_num=ViewId}=View | RestViews]   = Views,
-%    [{ViewId, KVs}               | RestViewKVs] = ViewKVs,
-%    RemovedKeys = couch_util:dict_find(ViewId, ToRemByView, []),
-%    NewState = case View#mrview.nested_views of
-%        [] -> State;
-%        _  -> visit_nested_views(State, View, KVs, RemovedKeys)
-%    end,
-%    traverse_nested_views(NewState, RestViews, RestViewKVs, ToRemByView).
+traverse_nested_views(State0, Views, ViewKVs, ToRemByView) ->
+    lists:foldl(fun(View, State1) ->
+            visit_nested_views(View, State1, ViewKVs, ToRemByView)
+        end, State0, Views).
+
+visit_nested_views(#mrview{id_num=ViewId}=View, State, ViewKVs, ToRemByView) ->
+    {ViewId, KVs} = lists:keyfind(ViewId, 1, ViewKVs),
+    RemovedKeys   = couch_util:dict_find(ViewId, ToRemByView, []),
+    case nested_views_for(View, State) of
+        [] -> State;
+        _NestedViews ->
+            ChangedViewKeys = unique_view_keys(KVs, RemovedKeys),
+            case view_reduced_results(View, ChangedViewKeys) of
+                [] -> State;
+                _ReducedResults ->
+                    %NestedResults = get_nested_results(State, ReducedResults, NestedViews),
+                    %Ref           = make_ref(),
+                    %NestedMapWork = {Ref, NestedViews, ReducedResults},
+                    %couch_work_queue:queue(State#mrst.nested_map_queue, NestedMapWork),
+                    %write_nested_results(State, View, Ref)
+                    State
+            end
+    end.
+
+nested_views_for(_View, _State) -> [].
 
 %visit_nested_views(State, View, KVs, RemovedKeys) ->
 %    ChangedViewKeys = unique_view_keys(KVs, RemovedKeys),
@@ -365,12 +382,12 @@ traverse_nested_views(State, _,_,_) -> State.
 %            couch_work_queue:queue(State#mrst.nested_map_queue, NestedMapWork),
 %            write_nested_results(State, View, Ref)
 %    end.
-%
-%unique_view_keys(KVs, RemovedKeys) ->
-%    Set0 = sets:from_list(RemovedKeys),
-%    Set1 = sets:from_list([Key || {{Key, _DocId}, _Value} <- KVs]),
-%    Set2 = sets:union([Set0, Set1]),
-%    sets:to_list(Set2).
+
+unique_view_keys(KVs, RemovedKeys) ->
+    Set0 = sets:from_list(RemovedKeys),
+    Set1 = sets:from_list([Key || {{Key, _DocId}, _Value} <- KVs]),
+    Set2 = sets:union([Set0, Set1]),
+    sets:to_list(Set2).
 
 % Returns a list of tuples:
 %   * when reduced key is missing: {Id, Seq, deleted}
@@ -378,10 +395,10 @@ traverse_nested_views(State, _,_,_) -> State.
 %     * Doc = #doc{id=?JSON_ENCODE(Key),
 %                  body={[{<<"key">>, Key}, {<<"value">>, V}]}
 %   * Id = json_bin_string(Key)
-%view_reduced_results(_View, []) -> [];
-%view_reduced_results(_View, _Keys) ->
-%    % TODO: figure out how to load the reduced rows group_level=exact
-%    [].
+view_reduced_results(_View, []) -> [];
+view_reduced_results(_View, _Keys) ->
+    % TODO: figure out how to load the reduced rows group_level=exact
+    [].
 
 
 send_partial(Pid, State) when is_pid(Pid) ->
