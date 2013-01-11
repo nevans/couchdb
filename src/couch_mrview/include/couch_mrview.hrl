@@ -43,8 +43,8 @@
     reduce_funs=[],
     def,
     btree=nil,
+    path=[],
     nested_id_btree=nil,
-    nested_views=[],
     options=[]
 }).
 

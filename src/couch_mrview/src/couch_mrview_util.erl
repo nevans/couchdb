@@ -58,41 +58,11 @@ get_view(Db, DDoc, ViewName, Args0) ->
     Sig = view_sig(Db, State, View, Args3),
     {ok, {Type, View}, Sig, Args3}.
 
-
 ddoc_to_mrst(DbName, #doc{id=Id, body={Fields}}) ->
-    MakeDict = fun({Name, {MRFuns}}, DictBySrcAcc) ->
-        case couch_util:get_value(<<"map">>, MRFuns) of
-            MapSrc when is_binary(MapSrc) ->
-                RedSrc = couch_util:get_value(<<"reduce">>, MRFuns, null),
-                {ViewOpts} = couch_util:get_value(<<"options">>, MRFuns, {[]}),
-                View = case dict:find({MapSrc, ViewOpts}, DictBySrcAcc) of
-                    {ok, View0} -> View0;
-                    error -> #mrview{def=MapSrc, options=ViewOpts}
-                end,
-                {MapNames, RedSrcs} = case RedSrc of
-                    null ->
-                        MNames = [Name | View#mrview.map_names],
-                        {MNames, View#mrview.reduce_funs};
-                    _ ->
-                        RedFuns = [{Name, RedSrc} | View#mrview.reduce_funs],
-                        {View#mrview.map_names, RedFuns}
-                end,
-                View2 = View#mrview{map_names=MapNames, reduce_funs=RedSrcs},
-                dict:store({MapSrc, ViewOpts}, View2, DictBySrcAcc);
-            undefined ->
-                DictBySrcAcc
-        end
-    end,
-    {RawViews} = couch_util:get_value(<<"views">>, Fields, {[]}),
-    BySrc = lists:foldl(MakeDict, dict:new(), RawViews),
-
-    NumViews = fun({_, View}, N) -> {View#mrview{id_num=N}, N+1} end,
-    {Views, _} = lists:mapfoldl(NumViews, 0, lists:sort(dict:to_list(BySrc))),
-
-    Language = couch_util:get_value(<<"language">>, Fields, <<"javascript">>),
-    {DesignOpts} = couch_util:get_value(<<"options">>, Fields, {[]}),
-    Lib = couch_util:get_value(<<"lib">>, RawViews, {[]}),
-
+    ?LOG_INFO("****** DB: ~s; DDoc: ~s~n", [DbName, Id]),
+    {Views, Lib} = extract_views_from_ddoc(Fields),
+    Language     = couch_util:get_value(<<"language">>, Fields, <<"javascript">>),
+    {DesignOpts} = couch_util:get_value(<<"options">>,  Fields, {[]}),
     IdxState = #mrst{
         db_name=DbName,
         idx_name=Id,
@@ -104,6 +74,58 @@ ddoc_to_mrst(DbName, #doc{id=Id, body={Fields}}) ->
     SigInfo = {Views, Language, DesignOpts, couch_index_util:sort_lib(Lib)},
     {ok, IdxState#mrst{sig=couch_util:md5(term_to_binary(SigInfo))}}.
 
+extract_views_from_ddoc(Fields) ->
+    {RawViews} = couch_util:get_value(<<"views">>, Fields, {[]}),
+    ?LOG_INFO("****** RawViews:~n** ~p~n", [RawViews]),
+    Views      = extract_mrviews_list_from_raw_views(RawViews),
+    Lib        = couch_util:get_value(<<"lib">>, RawViews, {[]}),
+    ?LOG_INFO("****** Views:~n** ~p~n", [Views]),
+    {Views, Lib}.
+
+extract_mrviews_list_from_raw_views(RawViews) ->
+    ViewDict = extract_mrviews_dict_from_raw_views(RawViews),
+    ?LOG_INFO("****** ViewDict:~n** ~p~n", [dict:to_list(ViewDict)]),
+    {Views, _} = lists:mapfoldl(
+      fun({_,V}, N) -> {V#mrview{id_num=N}, N+1} end,
+      0, lists:sort(dict:to_list(ViewDict))
+    ),
+    Views.
+
+extract_mrviews_dict_from_raw_views(RawViews) ->
+  extract_mrviews_dict_from_raw_views(RawViews, {dict:new(), []}).
+extract_mrviews_dict_from_raw_views(RawViews, Acc) ->
+    {Dict, _Path} = lists:foldl(fun add_raw_view_to_dict/2, Acc, RawViews),
+    Dict.
+
+add_raw_view_to_dict({Name, {ViewFields}}, {Dict0, Path}=Acc) ->
+    case couch_util:get_value(<<"map">>, ViewFields) of
+        MapSrc when is_binary(MapSrc) ->
+            {ViewOpts} = couch_util:get_value(<<"options">>, ViewFields, {[]}),
+            View0 = find_or_create_mrview(Dict0, MapSrc, ViewOpts, Path),
+            View1 = merge_view_names_and_reduce(View0, Name, ViewFields),
+            Dict1 = dict:store({MapSrc, ViewOpts, Path}, View1, Dict0),
+            Dict2 = extract_nested_views(ViewFields, {Dict1, [Name | Path]}),
+            {Dict2, Path};
+        undefined -> Acc
+    end.
+
+extract_nested_views(Fields, Acc) ->
+    {RawViews} = couch_util:get_value(<<"views">>, Fields, {[]}),
+    extract_mrviews_dict_from_raw_views(RawViews, Acc).
+
+find_or_create_mrview(Dict, MapSrc, ViewOpts, Path) ->
+    case dict:find({MapSrc, ViewOpts, Path}, Dict) of
+        {ok, View} -> View;
+        error -> #mrview{def=MapSrc, options=ViewOpts, path=Path}
+    end.
+
+merge_view_names_and_reduce(View, Name, ViewFields) when is_list(ViewFields) ->
+    ReduceSource = couch_util:get_value(<<"reduce">>, ViewFields, null),
+    merge_view_names_and_reduce(View, Name, ReduceSource);
+merge_view_names_and_reduce(View, Name, null) ->
+    View#mrview{map_names=[Name | View#mrview.map_names]};
+merge_view_names_and_reduce(View, Name, ReduceSource) ->
+    View#mrview{reduce_funs=[{Name, ReduceSource} | View#mrview.reduce_funs]}.
 
 set_view_type(_Args, _ViewName, []) ->
     throw({not_found, missing_named_view});
