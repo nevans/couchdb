@@ -103,7 +103,7 @@ add_raw_view_to_dict({Name, {ViewFields}}, {Dict0, Path}=Acc) ->
             {ViewOpts} = couch_util:get_value(<<"options">>, ViewFields, {[]}),
             View0 = find_or_create_mrview(Dict0, MapSrc, ViewOpts, Path),
             View1 = merge_view_names_and_reduce(View0, Name, ViewFields),
-            Dict1 = dict:store({MapSrc, ViewOpts, Path}, View1, Dict0),
+            Dict1 = dict:store({Path, MapSrc, ViewOpts}, View1, Dict0),
             Dict2 = extract_nested_views(ViewFields, {Dict1, [Name | Path]}),
             {Dict2, Path};
         undefined -> Acc
@@ -114,7 +114,7 @@ extract_nested_views(Fields, Acc) ->
     extract_mrviews_dict_from_raw_views(RawViews, Acc).
 
 find_or_create_mrview(Dict, MapSrc, ViewOpts, Path) ->
-    case dict:find({MapSrc, ViewOpts, Path}, Dict) of
+    case dict:find({Path, MapSrc, ViewOpts}, Dict) of
         {ok, View} -> View;
         error -> #mrview{def=MapSrc, options=ViewOpts, path=Path}
     end.
