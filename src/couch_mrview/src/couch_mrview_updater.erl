@@ -59,6 +59,9 @@ start_update(Partial, State, NumChanges) ->
 
 
 purge(_Db, PurgeSeq, PurgedIdRevs, State) ->
+    ?LOG_INFO("**********************************************~n", []),
+    ?LOG_INFO("*** TODO: couch_mrview_updater:purge(...) ****~n", []),
+    ?LOG_INFO("**********************************************~n", []),
     #mrst{
         id_btree=IdBtree,
         views=Views
@@ -350,12 +353,14 @@ traverse_view(State, #mrview{id_num=ViewId}=View, ViewData, ToRemByView) ->
 
 visit_nested_paths(State, _View, [], _Keys) -> State;
 visit_nested_paths(State0, View, Paths, ChangedViewKeys) ->
+    ?LOG_INFO("**** visit_nested_paths(... ~p ...)~n", [Paths]),
     lists:foldl(fun(Path, State1) ->
-            ReducedResult = reduced_results(View, Path, ChangedViewKeys),
+            ReducedResult = reduced_results(State1, View, Path, ChangedViewKeys),
             visit_nested_path(State1, View, Path, ReducedResult)
         end, State0, Paths).
 
 visit_nested_path(State0, ParentView, Path, ReducedResults) ->
+    ?LOG_INFO("**** visit_nested_path(... ~p ...)~n", [Path]),
     NestedViews = nested_views_for_path(Path, State0),
     lists:foldl(fun(NestedView, State1) ->
             visit_nested_view(State1, ParentView, Path,
@@ -363,7 +368,7 @@ visit_nested_path(State0, ParentView, Path, ReducedResults) ->
         end, State0, NestedViews).
 
 visit_nested_view(State, ParentView, Path, NestedViews, ReducedResults) ->
-    ?LOG_INFO("**** visit_nested_view(...)~n", []),
+    ?LOG_INFO("**** visit_nested_view(... ~p ...)~n", [ParentView#mrview.id_num]),
     #mrview{nested_id_btree=IdBtree} = ParentView,
     MapResults = wait_for_nested_map(State, NestedViews, ReducedResults),
     write_nested_results(State, ParentView, IdBtree, Path, MapResults).
@@ -401,9 +406,18 @@ unique_view_keys(KVs, RemovedKeys) ->
 %     * Doc = #doc{id=?JSON_ENCODE(Key),
 %                  body={[{<<"key">>, Key}, {<<"value">>, V}]}
 %   * Id = json_bin_string(Key)
-reduced_results(_View, _Path, _Keys) -> [].
-    % TODO: figure out how to load the reduced rows group_level=exact
+reduced_results(State, View, [ReduceName|_]=Path, Keys) ->
+    Db      = trying_to_get_away_with_not_defining_db,
+    Nth     = reduce_index(ReduceName, View#mrview.reduce_funs),
+    RedView = {Nth, State#mrst.language, View},
+    Results = couch_mrview:query_reduced_results(Db, RedView, Keys),
+    ?LOG_INFO("*** reduced_results for ~p, ~p: ~p~n", [Path, Keys, Results]),
+    [].
 
+reduce_index(Name, List) -> reduce_index(Name, List, 1).
+reduce_index(_, [], _)  -> not_found;
+reduce_index(Name, [{Name,_}|_], Index) -> Index;
+reduce_index(Name, [_|Tl], Index) -> reduce_index(Name, Tl, Index+1).
 
 send_partial(Pid, State) when is_pid(Pid) ->
     gen_server:cast(Pid, {new_state, State});

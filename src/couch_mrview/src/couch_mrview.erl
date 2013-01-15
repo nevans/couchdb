@@ -18,6 +18,8 @@
 -export([compact/2, compact/3, cancel_compaction/2]).
 -export([cleanup/1]).
 
+-export([query_reduced_results/3]).
+
 -include("couch_db.hrl").
 -include_lib("couch_mrview/include/couch_mrview.hrl").
 
@@ -325,6 +327,9 @@ red_fold(K, Red, #mracc{group_level=I} = Acc) when I > 0 ->
     {Go, UAcc1} = Callback({row, Row}, UAcc0),
     {Go, Acc#mracc{user_acc=UAcc1, limit=Limit-1, last_go=Go}}.
 
+query_reduced_results(Db, RedView, Keys) ->
+    Args = #mrargs{reduce=true, group_level=exact, keys=Keys},
+    red_fold(Db, RedView, Args, fun default_cb/2, []).
 
 finish_fold(#mracc{last_go=ok, update_seq=UpdateSeq}=Acc,  ExtraMeta) ->
     #mracc{callback=Callback, user_acc=UAcc, args=Args}=Acc,
