@@ -49,7 +49,7 @@ start_update(Partial, State, NumChanges) ->
         map_docs(Self, InitState)
     end,
     WriteFun = fun() -> write_results(Self, InitState) end,
-    NestedViewFun = fun() -> nested_view_map(Self, InitState) end,
+    NestedViewFun = fun() -> nested_map_docs(Self, InitState) end,
 
     spawn_link(MapFun),
     spawn_link(WriteFun),
@@ -167,9 +167,6 @@ compute_map_results(#mrst{qserver = Qs}, Dequeued) ->
     update_task(length(AllMapResults)),
     {ok, {MaxSeq, AllMapResults}}.
 
-root_views(State) ->
-    [V || V <- State#mrst.views, V#mrview.path =:= []].
-
 with_query_server(State, Views) ->
     case State#mrst.qserver of
         nil -> start_query_server(State, Views);
@@ -186,7 +183,7 @@ start_query_server(State, Views) ->
     State#mrst{qserver=QServer}.
 
 
-nested_view_map(Parent, State) ->
+nested_map_docs(Parent, State) ->
     case couch_work_queue:dequeue(State#mrst.nested_map_queue) of
         closed -> ok;
         {ok, [{Ref, Views, Docs}]} ->
@@ -195,7 +192,7 @@ nested_view_map(Parent, State) ->
             couch_work_queue:queue(NewState#mrst.nested_write_queue,
                                    {Ref, MapResults}),
             couch_query_servers:stop_doc_map(NewState#mrst.qserver),
-            nested_view_map(Parent, State)
+            nested_map_docs(Parent, State)
     end.
 
 
@@ -205,29 +202,21 @@ write_results(Parent, State0) ->
             couch_work_queue:close(State0#mrst.nested_map_queue),
             couch_work_queue:close(State0#mrst.nested_write_queue),
             Parent ! {new_state, State0};
-        {ok, Info} ->
-            {_,ViewKVs,_} = MergedViewData =
-                merge_results(Info, root_views(State0)),
-            {State1, ToRemByView} = write_kvs({State0}, MergedViewData),
-            State2 = traverse_nested_views(State1, root_views(State1),
-                                           ViewKVs, ToRemByView),
-            send_partial(State2#mrst.partial_resp_pid, State2),
-            write_results(Parent, State2)
+        {ok, MapResults} ->
+            State1 = write_nested_results(State0, MapResults),
+            send_partial(State1#mrst.partial_resp_pid, State1),
+            write_results(Parent, State1)
     end.
 
-%write_nested_results(State0, ParentView, Ref) ->
-%    case couch_work_queue:dequeue(State0#mrst.nested_write_queue) of
-%        closed -> error(nested_write_queue_closed_prematurely);
-%        {ok, [{Ref, Results}]} ->
-%            #mrview{
-%              nested_views=NestedViews, nested_id_btree=IdBtree
-%            } = ParentView,
-%            {_,ViewKVs,_} = MergedViewData =
-%                merge_results([Results], NestedViews),
-%            {State1, ToRemByView} = write_kvs({State0, IdBtree, NestedViews},
-%                                              MergedViewData),
-%            traverse_nested_views(State1, NestedViews, ViewKVs, ToRemByView)
-%    end.
+write_nested_results(State, Results) ->
+    #mrst{id_btree=IdBtree} = State,
+    write_nested_results(State, state, IdBtree, [], Results).
+write_nested_results(State0, IdBtreeLoc, IdBtree, Path, MapResults) ->
+    Views  = nested_views_for_path(Path, State0),
+    Merged = merge_results(MapResults, Views),
+    {State1, ToRemByView} = write_kvs(State0, IdBtreeLoc, IdBtree, Views, Merged),
+    traverse_view_path(State1, Path, Merged, ToRemByView).
+
 
 % TODO: make ViewKVs a dict, Key=ViewID; Value=ViewEntries.
 % it's currently being accessed via lists:keyfind
@@ -294,23 +283,20 @@ view_dup_reduction(ViewId) ->
     end.
 
 
-write_kvs({State}, MergedViewData) ->
-  #mrst{id_btree=IdBtree, views=Views} = State,
-  write_kvs({State, IdBtree, Views}, MergedViewData);
-write_kvs({State, IdBtree, Views}, {UpdateSeq, ViewKVs, DocIdKeys}) ->
-    FirstBuild  = State#mrst.first_build,
-    {ok, ToRemove, IdBtree2} = update_id_btree(IdBtree, DocIdKeys, FirstBuild),
+write_kvs(State0, IdBtreeLoc, IdBtree0, Views, {UpdateSeq, ViewKVs, DocIdKeys}) ->
+    FirstBuild  = State0#mrst.first_build,
+    {ok, ToRemove, IdBtree1} = update_id_btree(IdBtree0, DocIdKeys, FirstBuild),
     ToRemByView = collapse_rem_keys(ToRemove),
     UpdatedViews = lists:map(
-        fun(View) -> update_view(View, UpdateSeq, ViewKVs, ToRemByView) end,
+        fun(View) -> update_view(View, {IdBtreeLoc, IdBtree1}, {UpdateSeq, ViewKVs, ToRemByView}) end,
         Views
     ),
-    NewState = State#mrst{
-        views=UpdatedViews,
-        update_seq=UpdateSeq,
-        id_btree=IdBtree2
-    },
-    {NewState, ToRemByView}.
+    State1 = State0#mrst{views=UpdatedViews, update_seq=UpdateSeq},
+    State2 = case IdBtreeLoc of
+        state -> State1#mrst{id_btree=IdBtree1};
+        _ -> State1
+    end,
+    {State2, ToRemByView}.
 
 update_id_btree(Btree, DocIdKeys, true) ->
     ToAdd = [{Id, DIKeys} || {Id, DIKeys} <- DocIdKeys, DIKeys /= []],
@@ -331,7 +317,9 @@ collapse_rem_keys([{ok, {DocId, ViewIdKeys}} | Rest], Acc) ->
 collapse_rem_keys([{not_found, _} | Rest], Acc) ->
     collapse_rem_keys(Rest, Acc).
 
-update_view(#mrview{id_num=ViewID}=View, UpdateSeq, ViewKVs, ToRemByView) ->
+update_view(#mrview{id_num=ViewID}=View, {#mrview{id_num=ViewID}, IdBtree}, _) ->
+    View#mrview{nested_id_btree=IdBtree};
+update_view(#mrview{id_num=ViewID}=View, _, {UpdateSeq, ViewKVs, ToRemByView}) ->
     case lists:keyfind(ViewID, 1, ViewKVs) of
         false -> View;
         {ViewId, KVs} ->
@@ -346,42 +334,60 @@ update_view(#mrview{id_num=ViewID}=View, UpdateSeq, ViewKVs, ToRemByView) ->
 
 
 % Depth first recursive traversal
-traverse_nested_views(State0, Views, ViewKVs, ToRemByView) ->
+traverse_view_path(State0, Path, ViewData, ToRemByView) ->
+    Views = nested_views_for_path(Path, State0),
     lists:foldl(fun(View, State1) ->
-            visit_nested_views(View, State1, ViewKVs, ToRemByView)
+            traverse_view(State1, View, ViewData, ToRemByView)
         end, State0, Views).
 
-visit_nested_views(#mrview{id_num=ViewId}=View, State, ViewKVs, ToRemByView) ->
+traverse_view(State, #mrview{id_num=ViewId}=View, ViewData, ToRemByView) ->
+    {_Seq, ViewKVs, _DocIdKeys} = ViewData,
     {ViewId, KVs} = lists:keyfind(ViewId, 1, ViewKVs),
     RemovedKeys   = couch_util:dict_find(ViewId, ToRemByView, []),
-    case nested_views_for(View, State) of
-        [] -> State;
-        _NestedViews ->
-            ChangedViewKeys = unique_view_keys(KVs, RemovedKeys),
-            case view_reduced_results(View, ChangedViewKeys) of
-                [] -> State;
-                _ReducedResults ->
-                    %NestedResults = get_nested_results(State, ReducedResults, NestedViews),
-                    %Ref           = make_ref(),
-                    %NestedMapWork = {Ref, NestedViews, ReducedResults},
-                    %couch_work_queue:queue(State#mrst.nested_map_queue, NestedMapWork),
-                    %write_nested_results(State, View, Ref)
-                    State
-            end
+    ChangedViewKeys = unique_view_keys(KVs, RemovedKeys),
+    Paths = nested_paths_for_view(View, State),
+    visit_nested_paths(State, View, Paths, ChangedViewKeys).
+
+visit_nested_paths(State, _View, [], _Keys) -> State;
+visit_nested_paths(State0, View, Paths, ChangedViewKeys) ->
+    lists:foldl(fun(Path, State1) ->
+            ReducedResult = reduced_results(View, Path, ChangedViewKeys),
+            visit_nested_path(State1, View, Path, ReducedResult)
+        end, State0, Paths).
+
+visit_nested_path(State0, ParentView, Path, ReducedResults) ->
+    NestedViews = nested_views_for_path(Path, State0),
+    lists:foldl(fun(NestedView, State1) ->
+            visit_nested_view(State1, ParentView, Path,
+                              NestedView, ReducedResults)
+        end, State0, NestedViews).
+
+visit_nested_view(State, ParentView, Path, NestedViews, ReducedResults) ->
+    ?LOG_INFO("**** visit_nested_view(...)~n", []),
+    #mrview{nested_id_btree=IdBtree} = ParentView,
+    MapResults = wait_for_nested_map(State, NestedViews, ReducedResults),
+    write_nested_results(State, ParentView, IdBtree, Path, MapResults).
+
+wait_for_nested_map(State, NestedViews, ReducedResults) ->
+    ?LOG_INFO("**** wait_for_nested_map(State, ~p, ~p)~n",
+      [[IdNum || #mrview{id_num=IdNum} <- NestedViews],
+        length(ReducedResults)]),
+    Ref           = make_ref(),
+    NestedMapWork = {Ref, NestedViews, ReducedResults},
+    couch_work_queue:queue(State#mrst.nested_map_queue, NestedMapWork),
+    case couch_work_queue:dequeue(State#mrst.nested_write_queue) of
+        closed -> error(nested_write_queue_closed_prematurely);
+        {ok, [{Ref, MapResults}]} -> [MapResults]
     end.
 
-nested_views_for(_View, _State) -> [].
+nested_paths_for_view(#mrview{path=ParentPath}=View, State) ->
+    MaybeNested = [[Name|ParentPath] || {Name,_Fun} <- View#mrview.reduce_funs],
+    [NestedPath || #mrview{path=NestedPath} <- State#mrst.views,
+        lists:member(NestedPath, MaybeNested)].
 
-%visit_nested_views(State, View, KVs, RemovedKeys) ->
-%    ChangedViewKeys = unique_view_keys(KVs, RemovedKeys),
-%    case view_reduced_results(View, ChangedViewKeys) of
-%        [] -> ok;
-%        ReducedResults ->
-%            Ref           = make_ref(),
-%            NestedMapWork = {Ref, View#mrview.nested_views, ReducedResults},
-%            couch_work_queue:queue(State#mrst.nested_map_queue, NestedMapWork),
-%            write_nested_results(State, View, Ref)
-%    end.
+root_views(State) -> nested_views_for_path([], State).
+nested_views_for_path(Path, State) ->
+    [V || V <- State#mrst.views, V#mrview.path =:= Path].
 
 unique_view_keys(KVs, RemovedKeys) ->
     Set0 = sets:from_list(RemovedKeys),
@@ -395,10 +401,8 @@ unique_view_keys(KVs, RemovedKeys) ->
 %     * Doc = #doc{id=?JSON_ENCODE(Key),
 %                  body={[{<<"key">>, Key}, {<<"value">>, V}]}
 %   * Id = json_bin_string(Key)
-view_reduced_results(_View, []) -> [];
-view_reduced_results(_View, _Keys) ->
+reduced_results(_View, _Path, _Keys) -> [].
     % TODO: figure out how to load the reduced rows group_level=exact
-    [].
 
 
 send_partial(Pid, State) when is_pid(Pid) ->
