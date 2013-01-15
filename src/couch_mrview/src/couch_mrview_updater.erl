@@ -283,13 +283,13 @@ view_dup_reduction(ViewId) ->
     end.
 
 
-write_kvs(State0, IdBtreeLoc, IdBtree0, Views, {UpdateSeq, ViewKVs, DocIdKeys}) ->
+write_kvs(State0, IdBtreeLoc, IdBtree0, _Views, {UpdateSeq, ViewKVs, DocIdKeys}) ->
     FirstBuild  = State0#mrst.first_build,
     {ok, ToRemove, IdBtree1} = update_id_btree(IdBtree0, DocIdKeys, FirstBuild),
     ToRemByView = collapse_rem_keys(ToRemove),
     UpdatedViews = lists:map(
         fun(View) -> update_view(View, {IdBtreeLoc, IdBtree1}, {UpdateSeq, ViewKVs, ToRemByView}) end,
-        Views
+        State0#mrst.views
     ),
     State1 = State0#mrst{views=UpdatedViews, update_seq=UpdateSeq},
     State2 = case IdBtreeLoc of
