@@ -318,7 +318,8 @@ For the share/doc/static/rtd.css components:
 
 For the share/www/script/jquery.js component:
 
-  Copyright (c) 2009 John Resig, http://jquery.com/
+  Copyright 2012 jQuery Foundation and other contributors
+  http://jquery.com/
 
   Permission is hereby granted, free of charge, to any person obtaining
   a copy of this software and associated documentation files (the
@@ -449,7 +450,7 @@ For the src/ibrowse component:
 
 For the src/erlang-oauth component:
 
-  Copyright (c) 2008-2009 Tim Fletcher <http://tfletcher.com/>
+  Copyright the authors and contributors. All rights reserved.
 
   Permission is hereby granted, free of charge, to any person
   obtaining a copy of this software and associated documentation
