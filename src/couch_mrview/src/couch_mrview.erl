@@ -89,6 +89,17 @@ query_view(Db, {Type, View}, Args, Callback, Acc) ->
     end.
 
 
+query_reduced_results(Db, RedView, Keys) ->
+    Args = #mrargs{reduce=true, group_level=exact, keys=Keys, stale=ok},
+    red_fold(Db, RedView, Args, fun (Arg1, Arg2) ->
+      ?LOG_INFO(
+        "*************~nquery_reduced_results callback(~n  ~p,~n  ~p~n)~n",
+        [Arg1, Arg2]
+      ),
+      default_cb(Arg1, Arg2)
+    end, []).
+
+
 get_info(Db, DDoc) ->
     {ok, Pid} = couch_index_server:get_index(couch_mrview_index, Db, DDoc),
     couch_index:get_info(Pid).
@@ -326,10 +337,6 @@ red_fold(K, Red, #mracc{group_level=I} = Acc) when I > 0 ->
     Row = [{key, K}, {value, Red}],
     {Go, UAcc1} = Callback({row, Row}, UAcc0),
     {Go, Acc#mracc{user_acc=UAcc1, limit=Limit-1, last_go=Go}}.
-
-query_reduced_results(Db, RedView, Keys) ->
-    Args = #mrargs{reduce=true, group_level=exact, keys=Keys},
-    red_fold(Db, RedView, Args, fun default_cb/2, []).
 
 finish_fold(#mracc{last_go=ok, update_seq=UpdateSeq}=Acc,  ExtraMeta) ->
     #mracc{callback=Callback, user_acc=UAcc, args=Args}=Acc,

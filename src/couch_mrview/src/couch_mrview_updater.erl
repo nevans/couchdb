@@ -359,8 +359,9 @@ visit_nested_paths(State0, View, Paths, ChangedViewKeys) ->
             visit_nested_path(State1, View, Path, ReducedResult)
         end, State0, Paths).
 
+visit_nested_path(State, _, _, todo_not_implemented_yet) -> State;
 visit_nested_path(State0, ParentView, Path, ReducedResults) ->
-    ?LOG_INFO("**** visit_nested_path(... ~p ...)~n", [Path]),
+    ?LOG_INFO("**** visit_nested_path(... ~p,~n   ~p)~n", [Path, ReducedResults]),
     NestedViews = nested_views_for_path(Path, State0),
     lists:foldl(fun(NestedView, State1) ->
             visit_nested_view(State1, ParentView, Path,
@@ -407,12 +408,20 @@ unique_view_keys(KVs, RemovedKeys) ->
 %                  body={[{<<"key">>, Key}, {<<"value">>, V}]}
 %   * Id = json_bin_string(Key)
 reduced_results(State, View, [ReduceName|_]=Path, Keys) ->
-    Db      = trying_to_get_away_with_not_defining_db,
+    Db      = State#mrst.db_name,
     Nth     = reduce_index(ReduceName, View#mrview.reduce_funs),
     RedView = {Nth, State#mrst.language, View},
     Results = couch_mrview:query_reduced_results(Db, RedView, Keys),
     ?LOG_INFO("*** reduced_results for ~p, ~p: ~p~n", [Path, Keys, Results]),
-    [].
+    %[
+    %    {<<"1">>, State#mrst.update_seq, #doc{id= <<"1">>,
+    %        body={[{<<"key">>, 1}, {<<"value">>, 23}]}}},
+    %    {<<"2">>, State#mrst.update_seq, #doc{id= <<"1">>,
+    %        body={[{<<"key">>, 2}, {<<"value">>, 13}]}}},
+    %    {<<"3">>, State#mrst.update_seq, #doc{id= <<"1">>,
+    %        body={[{<<"key">>, 3}, {<<"value">>,  3}]}}}
+    %].
+    todo_not_implemented_yet.
 
 reduce_index(Name, List) -> reduce_index(Name, List, 1).
 reduce_index(_, [], _)  -> not_found;
