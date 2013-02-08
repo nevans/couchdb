@@ -36,7 +36,7 @@ Dependencies
 You should have the following installed:
 
  * Erlang OTP (>=R13B04)      (http://erlang.org/)
- * ICU                        (http://icu.sourceforge.net/)
+ * ICU                        (http://icu-project.org/)
  * OpenSSL                    (http://www.openssl.org/)
  * Mozilla SpiderMonkey (1.7) (http://www.mozilla.org/js/spidermonkey/)
  * GNU Make                   (http://www.gnu.org/software/make/)
@@ -89,6 +89,10 @@ You can install the build tools by running:
 
 You can install the other dependencies by running:
 
+    brew install autoconf
+    brew install autoconf-archive
+    brew install automake
+    brew install libtool
     brew install erlang
     brew install icu4c
     brew install spidermonkey
